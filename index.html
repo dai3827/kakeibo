@@ -60,6 +60,11 @@
     margin-top: 16px;
   }
   .balance-label { font-size: 13px; color: var(--ink-soft); }
+  .period-nav { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .pnav-btn { background: none; border: none; color: var(--ink-soft); font-size: 22px; line-height: 1; padding: 2px 12px; cursor: pointer; }
+  .pnav-btn:active { color: var(--ink); }
+  .setting-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; margin-bottom: 4px; }
+  .setting-note { font-size: 12px; color: var(--ink-faint); line-height: 1.6; }
   .balance-month { font-size: 12px; color: var(--ink-faint); margin-bottom: 10px; }
   .balance-amount { font-size: 40px; font-weight: 700; letter-spacing: -.02em; line-height: 1.1; }
   .balance-amount.minus { color: var(--expense); }
@@ -171,7 +176,11 @@
     <h1>今月の収支</h1>
   </header>
   <div class="balance-card">
-    <div class="balance-month" id="home-month"></div>
+    <div class="period-nav">
+      <button class="pnav-btn" onclick="prevPeriod()">‹</button>
+      <div class="balance-month" id="home-month"></div>
+      <button class="pnav-btn" onclick="nextPeriod()">›</button>
+    </div>
     <div class="balance-amount" id="home-balance">¥0</div>
     <div class="balance-breakdown">
       <div class="bd-item">
@@ -235,7 +244,7 @@
       </div>
     </div>
     <div class="chart-card">
-      <h3>今月の支出カテゴリ</h3>
+      <h3 id="pie-title">今月の支出カテゴリ</h3>
       <div id="pie-area"></div>
     </div>
   </div>
@@ -245,9 +254,19 @@
 <section class="screen" id="screen-cat">
   <header>
     <div class="eyebrow">設定</div>
-    <h1>カテゴリ</h1>
+    <h1>設定</h1>
   </header>
   <div style="margin-top:16px">
+    <div class="section-title" style="margin-left:4px;margin-top:0">集計の基準日</div>
+    <div class="setting-card">
+      <label class="field" style="margin-bottom:8px">
+        <span class="lbl">毎月この日から1か月として集計（給料日に合わせて）</span>
+        <select id="start-day"></select>
+      </label>
+      <div class="setting-note" id="period-preview"></div>
+    </div>
+
+    <div class="section-title" style="margin-left:4px">カテゴリ</div>
     <div class="cat-list" id="cat-list"></div>
     <div class="section-title" style="margin-left:4px">新しいカテゴリ</div>
     <div class="add-cat">
@@ -286,18 +305,72 @@ let pickedColor = PALETTE[0];
 function load() {
   try {
     const raw = localStorage.getItem(STORE);
-    if (raw) return JSON.parse(raw);
+    if (raw) {
+      const d = JSON.parse(raw);
+      if (!d.settings) d.settings = { startDay: 15 };
+      if (typeof d.settings.startDay !== 'number') d.settings.startDay = 15;
+      return d;
+    }
   } catch(e) {}
-  return { cats: DEFAULT_CATS.slice(), txs: [] };
+  return { cats: DEFAULT_CATS.slice(), txs: [], settings: { startDay: 15 } };
 }
 function save() {
   try { localStorage.setItem(STORE, JSON.stringify(data)); } catch(e) {}
 }
 
 const yen = n => '¥' + Math.round(n).toLocaleString('ja-JP');
-const monthKey = d => d.slice(0,7);
-const nowMonth = () => new Date().toISOString().slice(0,7);
 function catById(id){ return data.cats.find(c=>c.id===id) || {name:'削除済み', color:'#a3a29b'}; }
+
+// ===== 給料日基準の会計期間ロジック =====
+// startDay=15 のとき、7/15〜8/14 を「2025-06」(=6月分) として扱う。
+// periodKey: 期間を一意に表す 'YYYY-MM' 文字列（名目月＝期間開始月の1か月前）
+function startDay(){ return data.settings.startDay || 15; }
+
+// 日付文字列 'YYYY-MM-DD' が属する会計期間のキーを返す
+function periodKey(dateStr) {
+  const sd = startDay();
+  const [y, m, day] = dateStr.split('-').map(Number);
+  // 期間開始月を求める：日付が基準日以上ならその月、未満なら前月が「開始月」
+  let startY = y, startM = m; // 1-12
+  if (day < sd) { // 基準日より前 → 1つ前の期間（開始月は前月）
+    startM -= 1;
+    if (startM < 1) { startM = 12; startY -= 1; }
+  }
+  // 名目月 = 開始月の1か月前
+  let nomY = startY, nomM = startM - 1;
+  if (nomM < 1) { nomM = 12; nomY -= 1; }
+  return nomY + '-' + String(nomM).padStart(2, '0');
+}
+
+// 今日が属する会計期間キー
+function nowPeriod() {
+  return periodKey(new Date().toISOString().slice(0,10));
+}
+
+// periodKey 'YYYY-MM'（名目月）から、表示用ラベルと期間範囲を返す
+function periodInfo(pk) {
+  const sd = startDay();
+  const [nomY, nomM] = pk.split('-').map(Number);
+  // 開始月 = 名目月の1か月後
+  let sY = nomY, sM = nomM + 1;
+  if (sM > 12) { sM = 1; sY += 1; }
+  const start = new Date(sY, sM-1, sd);
+  const end = new Date(sY, sM-1, sd); end.setMonth(end.getMonth()+1); end.setDate(sd-1);
+  const f = d => (d.getMonth()+1) + '/' + d.getDate();
+  return {
+    label: nomY + '年' + nomM + '月分',
+    range: f(start) + '〜' + f(end),
+  };
+}
+
+// 名目月キーをn個前後にずらす
+function shiftPeriod(pk, delta) {
+  let [y, m] = pk.split('-').map(Number);
+  m += delta;
+  while (m > 12) { m -= 12; y += 1; }
+  while (m < 1) { m += 12; y -= 1; }
+  return y + '-' + String(m).padStart(2,'0');
+}
 
 function go(name) {
   document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
@@ -341,11 +414,12 @@ function delTx(id) {
   save(); renderHome();
 }
 
+let viewPeriod = nowPeriod(); // ホームで表示中の会計期間
+
 function renderHome() {
-  const m = nowMonth();
-  document.getElementById('home-month').textContent =
-    new Date().getFullYear()+'年'+(new Date().getMonth()+1)+'月';
-  const mtx = data.txs.filter(t=>monthKey(t.date)===m);
+  const info = periodInfo(viewPeriod);
+  document.getElementById('home-month').textContent = info.label + '（' + info.range + '）';
+  const mtx = data.txs.filter(t=>periodKey(t.date)===viewPeriod);
   const inc = mtx.filter(t=>t.type==='income').reduce((s,t)=>s+t.amount,0);
   const exp = mtx.filter(t=>t.type==='expense').reduce((s,t)=>s+t.amount,0);
   const bal = inc-exp;
@@ -358,7 +432,7 @@ function renderHome() {
   const sorted = mtx.slice().sort((a,b)=> b.date.localeCompare(a.date) || b.id.localeCompare(a.id));
   const wrap = document.getElementById('home-tx');
   if (sorted.length===0) {
-    wrap.innerHTML = '<div class="empty">まだ記録がありません。<br>「入力」から最初の収支を記録しましょう。</div>';
+    wrap.innerHTML = '<div class="empty">この期間の記録がありません。<br>「入力」から収支を記録しましょう。</div>';
     return;
   }
   wrap.innerHTML = '<div class="tx-list">' + sorted.map(t=>{
@@ -379,18 +453,18 @@ function renderHome() {
   }).join('') + '</div>';
 }
 
+function prevPeriod(){ viewPeriod = shiftPeriod(viewPeriod, -1); renderHome(); }
+function nextPeriod(){ viewPeriod = shiftPeriod(viewPeriod, 1); renderHome(); }
+
 function renderCharts() {
-  // bar chart: last 6 months
-  const months = [];
-  const base = new Date();
-  for (let i=5;i>=0;i--){
-    const d = new Date(base.getFullYear(), base.getMonth()-i, 1);
-    months.push(d.toISOString().slice(0,7));
-  }
-  const stats = months.map(m=>{
-    const mtx = data.txs.filter(t=>monthKey(t.date)===m);
+  // bar chart: 直近6期間（会計期間ベース）
+  const periods = [];
+  let pk = nowPeriod();
+  for (let i=0;i<6;i++){ periods.unshift(pk); pk = shiftPeriod(pk, -1); }
+  const stats = periods.map(p=>{
+    const mtx = data.txs.filter(t=>periodKey(t.date)===p);
     return {
-      m,
+      p,
       inc: mtx.filter(t=>t.type==='income').reduce((s,t)=>s+t.amount,0),
       exp: mtx.filter(t=>t.type==='expense').reduce((s,t)=>s+t.amount,0),
     };
@@ -402,15 +476,16 @@ function renderCharts() {
         <div class="bar income" style="height:${s.inc/max*100}%"></div>
         <div class="bar expense" style="height:${s.exp/max*100}%"></div>
       </div>
-      <div class="bar-label">${parseInt(s.m.slice(5))}月</div>
+      <div class="bar-label">${parseInt(s.p.slice(5))}月</div>
     </div>`).join('');
 
-  // pie: this month's expense by category
-  const m = nowMonth();
-  const exp = data.txs.filter(t=>t.type==='expense' && monthKey(t.date)===m);
+  // pie: 現在の会計期間の支出をカテゴリ別
+  const cur = nowPeriod();
+  const exp = data.txs.filter(t=>t.type==='expense' && periodKey(t.date)===cur);
   const total = exp.reduce((s,t)=>s+t.amount,0);
+  document.getElementById('pie-title').textContent = periodInfo(cur).label + 'の支出カテゴリ';
   const area = document.getElementById('pie-area');
-  if (total===0){ area.innerHTML='<div class="empty" style="padding:20px">今月の支出記録がありません。</div>'; return; }
+  if (total===0){ area.innerHTML='<div class="empty" style="padding:20px">この期間の支出記録がありません。</div>'; return; }
   const byCat = {};
   exp.forEach(t=>{ byCat[t.catId]=(byCat[t.catId]||0)+t.amount; });
   const rows = Object.entries(byCat).map(([id,v])=>({c:catById(id), v})).sort((a,b)=>b.v-a.v);
@@ -427,6 +502,23 @@ function renderCharts() {
 }
 
 function renderCats() {
+  // 基準日セレクト
+  const sel = document.getElementById('start-day');
+  if (sel && !sel.dataset.built) {
+    let opts = '';
+    for (let d=1; d<=28; d++) opts += `<option value="${d}">${d}日</option>`;
+    sel.innerHTML = opts;
+    sel.dataset.built = '1';
+    sel.addEventListener('change', ()=>{
+      data.settings.startDay = parseInt(sel.value);
+      save();
+      viewPeriod = nowPeriod();
+      updatePeriodPreview();
+    });
+  }
+  if (sel) sel.value = startDay();
+  updatePeriodPreview();
+
   document.getElementById('cat-list').innerHTML = data.cats.map(c=>`
     <div class="cat-row">
       <span class="cat-swatch" style="background:${c.color}"></span>
@@ -436,6 +528,12 @@ function renderCats() {
   document.getElementById('color-pick').innerHTML = PALETTE.map(col=>
     `<div class="color-dot ${col===pickedColor?'sel':''}" style="background:${col}" onclick="pickColor('${col}')"></div>`
   ).join('');
+}
+function updatePeriodPreview() {
+  const el = document.getElementById('period-preview');
+  if (!el) return;
+  const cur = periodInfo(nowPeriod());
+  el.textContent = '例：今は「' + cur.label + '」（' + cur.range + '）として集計中';
 }
 function pickColor(c){ pickedColor=c; renderCats(); }
 function addCat() {
